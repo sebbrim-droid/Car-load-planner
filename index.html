@@ -177,6 +177,7 @@ details input{width:76px}
       <button class="primary" id="savetrip">Save trip</button>
       <button id="newtrip">New trip</button>
       <button id="showtrips" aria-expanded="false">Saved trips</button>
+      <button id="pdfbtn">Download PDF</button>
       <span class="hint saved-at" id="savedat"></span>
     </div>
     <div id="tripsbox" hidden>
@@ -287,6 +288,10 @@ var CATALOG = {};
 var BRANDS = Object.keys(CATALOG).sort(function(a,b){ return a.localeCompare(b,undefined,{sensitivity:"base"}); });
 BRANDS.forEach(function(b){ CATALOG[b].sort(function(x,y){ return x.localeCompare(y); }); });
 var TFS = 0.40; // height/length ratio from which a car counts as tall for its size (Fiat 500 = 0.42)
+// special sports cars (expensive, very low clearance): if there is only one in the load it goes in R6, the rear lower spot, where it is lowest risk
+var SPORT_RE = /ferrari|lamborghini|mclaren|porsche (911|718|cayman|boxster|carrera)|aston martin|lotus|audi r8|corvette|gt-r|alpine a110|amg gt|maserati (mc20|granturismo)|bentley continental|bmw m8|bugatti|pagani|koenigsegg/i;
+function isSport(name){ var d = DBINFO[name]; return SPORT_RE.test(name||"") || !!(d && d.gc && d.gc<=110); }
+var SPORTW = 6; // how strongly a single sports car is kept in R6
 function findModel(name){ for(var i=0;i<MODELS.length;i++) if(MODELS[i][0]===name) return MODELS[i]; return null; }
 
 function basePositions(highCab){
@@ -349,14 +354,14 @@ var uid = 1;
 function carFromModel(name,stop,pin,ski){
   var m = MODELS.filter(function(x){return x[0]===name;})[0];
   if(!m) return {id:uid++,brand:"",model:"",len:0,h:0,kg:0,stop:stop||1,pin:pin||"",ski:!!ski};
-  return {id:uid++,brand:brandOf(name),model:name,len:m[1],h:m[2],kg:m[3],stop:stop||1,pin:pin||"",ski:!!ski};
+  return {id:uid++,brand:brandOf(name),model:name,len:m[1],h:m[2],kg:m[3],stop:stop||1,pin:pin||"",ski:!!ski,sport:isSport(name)};
 }
 var saved = store("lp-state-v3");
 var state = {
   profile: (saved && profiles[saved.profile]) ? saved.profile : "eurolohr200-low",
   cars: (saved && Array.isArray(saved.cars)) ? saved.cars : EXAMPLE.map(function(e){return carFromModel(e[0],e[1],e[2],e[3]);})
 };
-state.cars.forEach(function(c){ if(c.id>=uid) uid=c.id+1; });
+state.cars.forEach(function(c){ if(c.id>=uid) uid=c.id+1; if(c.sport===undefined) c.sport = isSport(c.model); });
 state.route = (saved && saved.route) || "base";
 if(!ROUTES.some(function(r){return r.id===state.route;})) state.route = "base";
 state.custom = (saved && saved.custom) || {h:4.00,front:0,rear:0};
@@ -418,6 +423,7 @@ function solve(cars, prof){
     return true;
   }
 
+  var nSport = cars.filter(function(c){return c.sport;}).length;
   function penalty(){
     var pen = 0, ids = Object.keys(occ);
     for(var i=0;i<ids.length;i++){
@@ -427,6 +433,7 @@ function solve(cars, prof){
       if(pa.deck==="lower") pen += Math.max(0, ca.h-1.45)*LOWH;   // big and tall cars go on top
       if(pa.id==="T1" && ca.len>0 && ca.h0/ca.len>=TFS) pen += 2;   // tall-for-size cars off the over-cab spot
       if(pa.id==="T2" && ca.h>=1.55 && ca.h<=1.72) pen += ca.len*T2LW - 3;  // T2 usually holds a mid-size SUV, the shorter one                          // tilted T2 spot: shorter car preferred (lower one to R4)
+      if(nSport===1 && ca.sport && pa.id!=="R6") pen += SPORTW;     // the only sports car goes in R6
       pen += (pa.fill||5)*FILLW;                                   // preferred spots first on partial loads
       pen -= ca.h*pa.maxH*ROOMW;                                   // tallest car where there is most room
       for(var j=0;j<ids.length;j++){
@@ -507,23 +514,96 @@ function planIssues(map, cars, prof){
   var P = {}; prof.positions.forEach(function(p){ P[p.id]=p; });
   var TILT = prof.tiltMax!=null ? prof.tiltMax : 1.50, w = {truck:0,trailer:0}, ids = Object.keys(map), out = [];
   for(var i=0;i<ids.length;i++){ var p=P[ids[i]], c=cars[map[ids[i]]];
-    if(c.len>p.maxL+1e-9) out.push(shortName(c.model)+" is too long for "+p.id+" ("+c.len.toFixed(2)+" m, max "+p.maxL.toFixed(2)+" m)");
-    if(c.h>p.maxH+1e-9) out.push(shortName(c.model)+" is too tall for "+p.id+" ("+c.h.toFixed(2)+" m, max "+p.maxH.toFixed(2)+" m)");
+    if(c.len>p.maxL+1e-9) out.push(shortName(c.model)+" is too long for "+p.id+" ("+c.len.toFixed(2)+" m, max "+p.maxL.toFixed(2)+" m: "+cmOver(c.len-p.maxL)+")");
+    if(c.h>p.maxH+1e-9) out.push(shortName(c.model)+" is too tall for "+p.id+" ("+c.h.toFixed(2)+" m, max "+p.maxH.toFixed(2)+" m: "+cmOver(c.h-p.maxH)+")");
     w[p.unit]+=c.kg; }
   if(w.truck>prof.payload.truck) out.push("truck payload over "+(prof.payload.truck/1000).toFixed(1)+" t");
   if(w.trailer>prof.payload.trailer) out.push("trailer payload over "+(prof.payload.trailer/1000).toFixed(1)+" t");
   for(var k=0;k<prof.pairs.length;k++){ var pr=prof.pairs[k];
-    if(map[pr.a]!==undefined && map[pr.b]!==undefined){ var t=cars[map[pr.a]].h+cars[map[pr.b]].h; if(t>pr.budget+1e-9) out.push(pr.a+" + "+pr.b+" stacked too high ("+t.toFixed(2)+" m, max "+pr.budget.toFixed(2)+" m)"); } }
+    if(map[pr.a]!==undefined && map[pr.b]!==undefined){ var t=cars[map[pr.a]].h+cars[map[pr.b]].h; if(t>pr.budget+1e-9) out.push(pr.a+" + "+pr.b+" stacked too high ("+t.toFixed(2)+" m, max "+pr.budget.toFixed(2)+" m: "+cmOver(t-pr.budget)+")"); } }
   for(var r=0;r<(prof.rows||[]).length;r++){ var row=prof.rows[r], L=0, hmax=0;
     row.ids.forEach(function(id){ if(map[id]!==undefined){ L+=cars[map[id]].len; hmax=Math.max(hmax,cars[map[id]].h); } });
-    if(L>row.maxL+1e-9) out.push(row.name.toLowerCase()+" too long ("+L.toFixed(2)+" m, max "+row.maxL.toFixed(2)+" m)");
-    if(map[row.ids[1]]!==undefined && hmax>TILT+1e-9) out.push(row.ids[1]+" needs the tilt, which only works when every car on that deck is "+TILT.toFixed(2)+" m or lower"); }
+    if(L>row.maxL+1e-9) out.push(row.name.toLowerCase()+" too long ("+L.toFixed(2)+" m, max "+row.maxL.toFixed(2)+" m: "+cmOver(L-row.maxL)+")");
+    if(map[row.ids[1]]!==undefined && hmax>TILT+1e-9) out.push(row.ids[1]+" needs the tilt, which only works when every car on that deck is "+TILT.toFixed(2)+" m or lower (tallest is "+hmax.toFixed(2)+" m: "+cmOver(hmax-TILT)+")"); }
   return out;
 }
+function cmOver(d){ return Math.max(1,Math.round(d*100))+" cm over"; }
+// how far a plan is outside the rules, as one number (metres; payload in tonnes)
+function overScore(map, cars, prof){
+  var P = {}; prof.positions.forEach(function(p){ P[p.id]=p; });
+  var TILT = prof.tiltMax!=null ? prof.tiltMax : 1.50, w = {truck:0,trailer:0}, sc = 0;
+  Object.keys(map).forEach(function(id){ var p=P[id], c=cars[map[id]];
+    sc += Math.max(0,c.len-p.maxL) + 2*Math.max(0,c.h-p.maxH); w[p.unit]+=c.kg; });
+  sc += Math.max(0,w.truck-prof.payload.truck)/1000 + Math.max(0,w.trailer-prof.payload.trailer)/1000;
+  prof.pairs.forEach(function(pr){ if(map[pr.a]!==undefined && map[pr.b]!==undefined) sc += 2*Math.max(0, cars[map[pr.a]].h+cars[map[pr.b]].h-pr.budget); });
+  (prof.rows||[]).forEach(function(row){ var L=0, hmax=0;
+    row.ids.forEach(function(id){ if(map[id]!==undefined){ L+=cars[map[id]].len; hmax=Math.max(hmax,cars[map[id]].h); } });
+    sc += Math.max(0, L-row.maxL);
+    if(map[row.ids[1]]!==undefined) sc += 2*Math.max(0, hmax-TILT); });
+  return sc;
+}
+// when not every car fits within the rules, still give every car a position (as long as there are free positions):
+// for each position, plan the other cars within the rules around it, put the car that is left over there,
+// and keep the option that breaks the fewest rules by the least. Then say per car by how much it is over.
+function softCost(map, cars, prof){ return 10*planIssues(map, cars, prof).length + overScore(map, cars, prof); }
+function forcePlace(res, cars, prof){
+  res.forced = {}; res.overIssues = [];
+  if(!res.unplaced.length) return res;
+  var best = null;
+  function improve(map){ // swap cars around while that breaks fewer rules / by less
+    var cost = softCost(map, cars, prof), ids = prof.positions.map(function(p){ return p.id; });
+    for(var round=0; round<3; round++){
+      var better = null;
+      for(var a=0;a<ids.length;a++) for(var b=a+1;b<ids.length;b++){
+        var ca = map[ids[a]], cb = map[ids[b]];
+        if(ca===undefined && cb===undefined) continue;
+        if((ca!==undefined && cars[ca].pin) || (cb!==undefined && cars[cb].pin)) continue;
+        var m = Object.assign({}, map); delete m[ids[a]]; delete m[ids[b]];
+        if(cb!==undefined) m[ids[a]] = cb; if(ca!==undefined) m[ids[b]] = ca;
+        var c = softCost(m, cars, prof);
+        if(c < cost - 1e-9 && (!better || c < better.c)) better = {c:c, m:m};
+      }
+      if(!better) break;
+      map = better.m; cost = better.c;
+    }
+    return {map:map, cost:cost};
+  }
+  prof.positions.forEach(function(hole){
+    var prof2 = Object.assign({}, prof, {positions: prof.positions.filter(function(p){ return p.id!==hole.id; })});
+    var sub = solve(cars, prof2), map = Object.assign({}, sub.map);
+    var left = sub.unplaced.map(function(u){ return cars.indexOf(u.car); });
+    if(!left.length) return;
+    var first = left[0];
+    if(cars[first].pin && cars[first].pin!==hole.id) return;
+    map[hole.id] = first;
+    left.slice(1).forEach(function(ci){ // more than one car over: least-bad free spot each
+      var b = null;
+      prof.positions.forEach(function(p){ if(map[p.id]!==undefined || (cars[ci].pin && p.id!==cars[ci].pin)) return;
+        var m = Object.assign({}, map); m[p.id] = ci; var sc = softCost(m, cars, prof); if(!b || sc < b.sc) b = {sc:sc, m:m}; });
+      if(b) map = b.m;
+    });
+    var r = improve(map);
+    if(!best || r.cost < best.cost) best = {cost:r.cost, map:r.map, extra:left};
+  });
+  if(!best) return res;
+  var map = best.map;
+  res.overIssues = planIssues(map, cars, prof);
+  // the car(s) to check: taking them off fixes the most broken rules
+  var gain = {}, top = 0;
+  Object.keys(map).forEach(function(pid){ var w = Object.assign({}, map); delete w[pid];
+    gain[pid] = res.overIssues.length - planIssues(w, cars, prof).length; top = Math.max(top, gain[pid]); });
+  Object.keys(gain).forEach(function(pid){ if(top>0 && gain[pid]===top) res.forced[pid] = true; });
+  var placed = {}; Object.keys(map).forEach(function(pid){ placed[map[pid]] = true; });
+  res.map = map;
+  res.unplaced = cars.map(function(c,i){ return i; }).filter(function(i){ return !placed[i]; }).map(function(i){ return {car:cars[i], reason:"no free position left"}; });
+  return res;
+}
+
 function planWhy(map, cars, prof){ return planIssues(map, cars, prof)[0] || null; }
 
 /* ---------- moving cars on the drawing ---------- */
 var sel = null, moveMsg = "", last = null, placedAt = {};
+var planCache = {key:null, res:null};
 function moveMap(carId, target){
   // the plan as it would be after moving the selected car to target (swap if taken)
   var cars = last.cars, map = Object.assign({}, last.res.map), ci = -1, from = null;
@@ -557,7 +637,7 @@ function leaveBehind(carId){
   sel = null; moveMsg = ""; saveState(); renderCars(); render();
 }
 function autoPlan(){ state.cars.forEach(function(c){ c.pin = ""; c.left = false; }); sel = null; moveMsg = ""; saveState(); renderCars(); render(); }
-function carObj(c, i, prof){ return {n:i+1,id:c.id,pin:c.pin||"",model:c.model,ski:!!c.ski,len:+c.len||0,h0:+c.h||0,h:(+c.h||0)+(c.ski?prof.skibox:0),kg:+c.kg||0,stop:Math.max(1,Math.round(+c.stop||1))}; }
+function carObj(c, i, prof){ return {n:i+1,id:c.id,pin:c.pin||"",model:c.model,ski:!!c.ski,sport:!!c.sport,len:+c.len||0,h0:+c.h||0,h:(+c.h||0)+(c.ski?prof.skibox:0),kg:+c.kg||0,stop:Math.max(1,Math.round(+c.stop||1))}; }
 
 /* ---------- rendering ---------- */
 var $ = function(id){ return document.getElementById(id); };
@@ -588,6 +668,7 @@ function renderCars(){
           '<span class="hint where" data-where="'+c.id+'" style="font-family:var(--mono);white-space:nowrap">'+(c.left?'Left behind':(placedAt[c.id]?'On '+placedAt[c.id]+(c.pin?' (moved)':''):(c.model?'Not loaded':'')))+'</span>'+
           '<input id="s'+c.id+'" type="number" step="1" min="1" max="9" data-k="stop" aria-label="Stop of car '+(i+1)+'" title="Stop" value="'+c.stop+'">'+
           '<label class="ski" for="r'+c.id+'"><input id="r'+c.id+'" type="checkbox" data-k="ski"'+(c.ski?' checked':'')+'> Roof box</label>'+
+          '<label class="ski" for="sp'+c.id+'"><input id="sp'+c.id+'" type="checkbox" data-k="sport"'+(c.sport?' checked':'')+'> Sports car</label>'+
           '<span class="lab">← Stop</span>'+
         '</div>'+
         '<span class="sum">'+(c.model ? (+c.len).toFixed(2)+' m long · '+(+c.h).toFixed(2)+' m high · '+c.kg+' kg'+(info?' · '+esc(info.body):'')+(c.ski?' · <b>roof box +'+Math.round(prof.skibox*100)+' cm</b>':'')+(flag?' · <b>'+esc(flag)+'</b>':'') : 'Not planned until a model is picked')+'</span>'+
@@ -658,7 +739,10 @@ function render(){
   var route = routeObj(), prof = effective(profiles[state.profile], route);
   var allCars = state.cars.map(function(c,i){ var o = carObj(c,i,prof); o.left = !!c.left; return o; }).filter(function(c){ return c.model && c.len>0; });
   var cars = allCars.filter(function(c){ return !c.left; });
-  var res = solve(cars, prof);
+  var planKey = JSON.stringify({c:cars.map(function(c){ return [c.model,c.len,c.h,c.kg,c.pin,c.stop,c.sport,c.ski]; }), p:prof});
+  var res;
+  if(planCache.key===planKey) res = JSON.parse(planCache.res);
+  else { res = forcePlace(solve(cars, prof), cars, prof); planCache = {key:planKey, res:JSON.stringify(res)}; } // squeezing in leftover cars is slow: only redo it when something changed
   last = {res:res, cars:cars, prof:prof};
   var nLeft = allCars.length - cars.length;
   placedAt = {}; Object.keys(res.map).forEach(function(pid){ placedAt[cars[res.map[pid]].id] = pid; });
@@ -669,7 +753,7 @@ function render(){
   // diagram
   var svg = drawTruck(prof);
   prof.positions.forEach(function(p){
-    var ci = res.map[p.id], car = ci!==undefined?cars[ci]:null, mode = "";
+    var ci = res.map[p.id], car = ci!==undefined?cars[ci]:null, mode = (res.forced[p.id] && sel===null) ? "warn" : "";
     if(sel!==null){
       if(car && car.id===sel) mode = "sel";
       else { var m = moveMap(sel, p.id); mode = planWhy(m.map, m.cars, prof) ? "warn" : "ok"; }
@@ -743,6 +827,11 @@ function render(){
     if(n===3 && r.maxL-L<0.15) iss.push('<li class="warn">'+esc(r.name)+' is '+L.toFixed(2)+' m of '+r.maxL.toFixed(2)+' m. Tight: check the gaps between the cars.</li>'); });
   if(inv) iss.push('<li class="warn">Some cars for earlier stops sit behind cars for later stops. This plan loads the most cars; reorder by hand if unloading matters more.</li>');
   if(route.id!=="base") iss.push('<li class="warn">Limits adjusted for '+esc(route.name)+' (height '+(route.h!=null?route.h:4).toFixed(2)+' m). These come from the rules and your overhang setting, not from measurements. Check before driving.</li>');
+  var sportCars = cars.filter(function(c){return c.sport;});
+  if(sportCars.length===1){ var sc = sportCars[0], sIdx = cars.indexOf(sc), at = null;
+    Object.keys(res.map).forEach(function(id){ if(res.map[id]===sIdx) at=id; });
+    if(at && at!=="R6") iss.push('<li class="warn">'+esc(sc.model)+' is the only sports car but sits on '+at+', not R6. R6 is the safest spot for it: check why it did not go there.</li>');
+  } else if(sportCars.length>1) iss.push('<li class="warn">'+sportCars.length+' sports cars in this load: only one can go in R6, so check where the others go.</li>');
   if(res.capped) iss.push('<li class="warn">Large trip: the search stopped early, so a better plan may exist.</li>');
   // stacks close to their limit also count as tight
   var tightStack = prof.pairs.some(function(pr){ return res.map[pr.a]!==undefined && res.map[pr.b]!==undefined && pr.budget-(cars[res.map[pr.a]].h+cars[res.map[pr.b]].h)<0.05; });
@@ -755,12 +844,20 @@ function render(){
     var m2 = Object.assign({},res.map); m2[pids[a]]=res.map[pids[b]]; m2[pids[b]]=res.map[pids[a]];
     if(planOK(m2,cars,prof)) swaps.push(esc(ca.model)+' ('+pids[a]+') ↔ '+esc(cb.model)+' ('+pids[b]+')');
   }
-  var broken = planIssues(res.map, cars, prof);
+  var forcedMsgs = [], forcedIds = Object.keys(res.forced);
+  if(forcedIds.length){
+    forcedMsgs = res.overIssues || [];
+    forcedMsgs.slice().reverse().forEach(function(x){ iss.unshift('<li class="warn">May not fit: '+esc(x)+'.</li>'); });
+    iss.unshift('<li class="warn"><b>'+forcedIds.map(function(pid){ var c = cars[res.map[pid]]; return c.n+'. '+esc(c.model)+' on '+pid; }).join(', ')+
+      '</b>: not every car fits within the limits, so '+(forcedIds.length>1?'these were':'this one was')+' put where it is least over. Check the clearances below on the truck.</li>');
+  }
+  var broken = planIssues(res.map, cars, prof).filter(function(x){ return forcedMsgs.indexOf(x)<0; });
   broken.forEach(function(b){ iss.unshift('<li class="bad">Breaks a rule: '+esc(b)+'. Check before loading.</li>'); });
   if(nLeft) iss.unshift('<li>'+nLeft+' car'+(nLeft>1?'s':'')+' left behind by you. Tap '+(nLeft>1?'one':'it')+' under the drawing to put it back.</li>');
   var nWarn = iss.filter(function(x){return x.indexOf('class="warn"')>=0 && x.indexOf('Limits adjusted')<0 && x.indexOf('unloading')<0 && x.indexOf('search stopped')<0;}).length + (tightStack?1:0);
   var verdict = broken.length ? ['bad','Breaks '+(broken.length>1?broken.length+' loading rules':'a loading rule')+': check']
-    : res.unplaced.length ? ['bad','Doesn\'t fit: '+res.unplaced.length+' car'+(res.unplaced.length>1?'s':'')+' left behind']
+    : res.unplaced.length ? ['bad','No room: '+res.unplaced.length+' car'+(res.unplaced.length>1?'s':'')+' left over']
+    : forcedIds.length ? ['warn','Might fit: '+forcedIds.length+' car'+(forcedIds.length>1?'s':'')+' over the limits']
     : !cars.length ? null : nLeft ? ['warn','Fits without '+nLeft+' car'+(nLeft>1?'s':'')+' you left behind'] : nWarn ? ['warn','Fits, but tight'] : ['ok','Fits'];
   $("verdict").className = "verdict"+(verdict?" "+verdict[0]:"");
   $("vtext").textContent = verdict ? verdict[1] : "Add cars to plan a load";
@@ -811,11 +908,12 @@ $("cars").addEventListener("change",function(e){
   var k = el.dataset.k;
   if(k==="pin"){ c.pin = el.value; saveState(); render(); return; }
   if(k==="ski"){ c.ski = el.checked; saveState(); renderCars(); render(); return; }
+  if(k==="sport"){ c.sport = el.checked; saveState(); renderCars(); render(); return; }
   if(k==="brand"){ c.brand = el.value; c.model=""; c.pin=""; c.left=false; c.len=0; c.h=0; c.kg=0; saveState(); renderCars(); render(); var mm=$("m"+c.id); if(mm) mm.focus(); return; }
   if(k==="model"){
     var m = findModel(el.value);
     c.pin=""; c.left=false;
-    if(m){ c.model=m[0]; c.len=m[1]; c.h=m[2]; c.kg=m[3]; } else { c.model=""; c.len=0; c.h=0; c.kg=0; }
+    if(m){ c.model=m[0]; c.len=m[1]; c.h=m[2]; c.kg=m[3]; c.sport=isSport(m[0]); } else { c.model=""; c.len=0; c.h=0; c.kg=0; }
     saveState(); renderCars(); render(); return;
   }
   c[k] = parseFloat(el.value)||0;
@@ -909,6 +1007,128 @@ function renderTrips(){
   }).join("") : '<p class="hint">No saved trips yet. Name this trip and press “Save trip”.</p>';
 }
 function snapshot(){ return JSON.parse(JSON.stringify({profile:state.profile,route:state.route,custom:state.custom,cars:state.cars})); }
+/* ---------- PDF export: drawing + car list, built without libraries ---------- */
+function pdfText(str){
+  return String(str).replace(/→/g,"->").replace(/←/g,"<-").replace(/↔/g,"<->").replace(/…/g,"...").replace(/[–—]/g,"-")
+    .replace(/[^\x20-\xff]/g,"?").replace(/\\/g,"\\\\").replace(/\(/g,"\\(").replace(/\)/g,"\\)");
+}
+function svgForPrint(){
+  var L = last; if(!L) return null;
+  var svg = drawTruck(L.prof);
+  L.prof.positions.forEach(function(p){ var ci = L.res.map[p.id]; svg += drawSlot(p, ci!==undefined?L.cars[ci]:null, ci, ""); });
+  var cs = getComputedStyle(document.documentElement);
+  var fixed = {"--bg":"#ffffff","--ink":"#1d1d1f","--muted":"#6b6b6b","--steel":"#5a5f66","--deck":"#8a9099","--slot":"#a0a4aa"};
+  svg = svg.replace(/var\((--[\w-]+)\)/g, function(m,n){ return (fixed[n] || cs.getPropertyValue(n).trim() || "#888").replace(/"/g,"'"); })
+           .replace(/ class="[^"]*"| tabindex="0"| role="button"/g,"");
+  return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 -30 1000 330" width="2400" height="792"><rect x="0" y="-30" width="1000" height="330" fill="#ffffff"/>'+svg+'</svg>';
+}
+function svgToJpeg(svgStr, cb){
+  var img = new Image();
+  img.onload = function(){
+    var c = document.createElement("canvas"); c.width = 2400; c.height = 792;
+    var g = c.getContext("2d"); g.fillStyle = "#fff"; g.fillRect(0,0,c.width,c.height); g.drawImage(img,0,0,c.width,c.height);
+    var b64 = c.toDataURL("image/jpeg",0.92).split(",")[1], bin = atob(b64), bytes = new Uint8Array(bin.length);
+    for(var i=0;i<bin.length;i++) bytes[i] = bin.charCodeAt(i);
+    cb(null, bytes, c.width, c.height);
+  };
+  img.onerror = function(){ cb(new Error("drawing could not be rendered")); };
+  img.src = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(svgStr);
+}
+function latin1(str){ var b = new Uint8Array(str.length); for(var i=0;i<str.length;i++) b[i] = str.charCodeAt(i) & 255; return b; }
+function buildPdf(jpeg, iw, ih, lines){
+  // A4 landscape, 1 page: Helvetica + Helvetica-Bold + one JPEG
+  var W = 842, H = 595, M = 30, imgW = W-2*M, imgH = imgW*ih/iw, cmd = [];
+  var y = H-M-14;
+  function text(x, yy, size, bold, t, rgb){ cmd.push("BT "+(rgb||"0 0 0")+" rg /"+(bold?"F2":"F1")+" "+size+" Tf "+x+" "+yy.toFixed(1)+" Td ("+pdfText(t)+") Tj ET"); }
+  text(M, y, 16, true, lines.title); y -= 16;
+  text(M, y, 9, false, lines.sub, "0.35 0.35 0.35"); y -= 18;
+  text(M, y, 12, true, lines.verdict, lines.verdictRgb); y -= 10;
+  var imgY = y - imgH;
+  cmd.push("q "+imgW.toFixed(1)+" 0 0 "+imgH.toFixed(1)+" "+M+" "+imgY.toFixed(1)+" cm /Im1 Do Q");
+  y = imgY - 20;
+  var cols = [M, M+40, M+65, M+330, M+370, M+430, M+490];
+  ["Pos","#","Car","Stop","Length","Height","Notes"].forEach(function(h,i){ text(cols[i], y, 9, true, h); });
+  cmd.push("0.75 G 0.5 w "+M+" "+(y-4).toFixed(1)+" m "+(W-M)+" "+(y-4).toFixed(1)+" l S");
+  y -= 15;
+  lines.rows.forEach(function(r){
+    if(y < M) return;
+    r.forEach(function(v,i){ text(cols[i], y, 9, i===0, v, r.empty&&i>1?"0.55 0.55 0.55":null); });
+    y -= 13;
+  });
+  (lines.over||[]).forEach(function(t){ if(y > M+10){ text(M, y, 8.5, false, "May not fit: "+t, "0.75 0.45 0"); y -= 12; } });
+  if(lines.left.length && y > M){ y -= 4; text(M, y, 9, true, "Left behind: "+lines.left.join(", "), "0.7 0.1 0.1"); y -= 13; }
+  if(y > M) text(M, M-8 > 10 ? M-12 : 12, 7, false, "An indication within the loading rules, not the only way to load. Sizes are database estimates: check before driving.", "0.45 0.45 0.45");
+  var content = latin1(cmd.join("\n"));
+  var objs = [];
+  objs[1] = latin1("<< /Type /Catalog /Pages 2 0 R >>");
+  objs[2] = latin1("<< /Type /Pages /Kids [3 0 R] /Count 1 >>");
+  objs[3] = latin1("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 "+W+" "+H+"] /Resources << /Font << /F1 4 0 R /F2 5 0 R >> /XObject << /Im1 6 0 R >> >> /Contents 7 0 R >>");
+  objs[4] = latin1("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>");
+  objs[5] = latin1("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>");
+  objs[6] = {head: latin1("<< /Type /XObject /Subtype /Image /Width "+iw+" /Height "+ih+" /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length "+jpeg.length+" >>\nstream\n"), body: jpeg, tail: latin1("\nendstream")};
+  objs[7] = {head: latin1("<< /Length "+content.length+" >>\nstream\n"), body: content, tail: latin1("\nendstream")};
+  var parts = [latin1("%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")], off = parts[0].length, xref = [];
+  for(var i=1;i<objs.length;i++){
+    xref[i] = off;
+    var o = objs[i], seg = o.head ? [latin1(i+" 0 obj\n"), o.head, o.body, o.tail, latin1("\nendobj\n")] : [latin1(i+" 0 obj\n"), o, latin1("\nendobj\n")];
+    seg.forEach(function(b){ parts.push(b); off += b.length; });
+  }
+  var x = "xref\n0 "+objs.length+"\n0000000000 65535 f \n";
+  for(var k=1;k<objs.length;k++) x += String(xref[k]).padStart(10,"0")+" 00000 n \n";
+  x += "trailer\n<< /Size "+objs.length+" /Root 1 0 R >>\nstartxref\n"+off+"\n%%EOF";
+  parts.push(latin1(x));
+  return new Blob(parts, {type:"application/pdf"});
+}
+function exportPdf(){
+  var btn = $("pdfbtn"), L = last;
+  if(!L || !L.cars.length){ btn.textContent = "Add cars first"; setTimeout(function(){ btn.textContent = "Download PDF"; },2000); return; }
+  btn.disabled = true; btn.textContent = "Making PDF…";
+  svgToJpeg(svgForPrint(), function(err, jpeg, iw, ih){
+    btn.disabled = false; btn.textContent = "Download PDF";
+    if(err){ alertMsg("Could not make the PDF: "+err.message); return; }
+    var route = routeObj(), name = (state.tripName||"").trim();
+    var placed = {}, rows = [];
+    L.prof.positions.forEach(function(p){
+      var ci = L.res.map[p.id], c = ci!==undefined ? L.cars[ci] : null;
+      if(c){ placed[c.id] = true;
+        var notes = []; if(c.ski) notes.push("roof box"); if(c.sport) notes.push("sports car"); if(c.pin) notes.push("moved by hand"); if(L.res.forced && L.res.forced[p.id]) notes.push("MAY NOT FIT, check clearances");
+        var nt = notes.join(", "); if(nt.length>72) nt = nt.slice(0,70)+"...";
+        rows.push([p.id, String(c.n), c.model, String(c.stop), c.len.toFixed(2)+" m", c.h.toFixed(2)+" m", nt]);
+      } else { var r = [p.id, "", "empty", "", "", "", ""]; r.empty = true; rows.push(r); }
+    });
+    var left = state.cars.filter(function(c){ return c.model && !placed[c.id]; }).map(function(c){ return c.model; });
+    var v = ($("vtext").textContent||"").trim();
+    var rgb = /no room|breaks|doesn/i.test(v) ? "0.7 0.1 0.1" : /tight|might/i.test(v) ? "0.75 0.45 0" : "0.1 0.5 0.2";
+    var date = new Date().toLocaleDateString(undefined,{day:"numeric",month:"short",year:"numeric"});
+    var blob = buildPdf(jpeg, iw, ih, {
+      title: name || "Load plan",
+      sub: L.prof.name + (route.id!=="base" ? " · "+route.name : "") + " · " + date + " · " + Object.keys(placed).length + " / " + (Object.keys(placed).length+left.length) + " cars loaded",
+      verdict: v || "Load plan", verdictRgb: rgb, rows: rows, left: left, over: (L.res.overIssues||[])
+    });
+    var file = (name || "load-plan").replace(/[^\w\- ]+/g,"").trim().replace(/\s+/g,"-").slice(0,60) || "load-plan";
+    savePdf(blob, file + ".pdf");
+  });
+}
+// inside the Claude artifact viewer, files go out through the "downloads" capability; on a normal website (e.g. GitHub Pages) a plain download link works
+function plainDownload(blob, name){
+  var url = URL.createObjectURL(blob), a = document.createElement("a");
+  a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(function(){ URL.revokeObjectURL(url); }, 60000);
+}
+function savePdf(blob, name){
+  var use = window.claude && typeof window.claude.use === "function" ? window.claude.use("downloads") : null;
+  if(!use){ plainDownload(blob, name); return; }
+  Promise.resolve(use).then(function(dl){
+    if(!dl){ plainDownload(blob, name); return; }
+    return dl.save({filename: name, data: blob}).catch(function(e){
+      if(e && e.code === "declined") return;
+      if(e && e.code === "rate_limited"){ alertMsg("A save prompt is already open. Try again in a moment."); return; }
+      plainDownload(blob, name);
+    });
+  }).catch(function(){ plainDownload(blob, name); });
+}
+function alertMsg(t){ var el = $("savedat"); if(el){ el.innerHTML = '<span style="color:var(--bad)">'+esc(t)+'</span>'; } }
+$("pdfbtn").addEventListener("click", exportPdf);
 $("tripname").addEventListener("input",function(e){ state.tripName = e.target.value; saveState(); });
 $("savetrip").addEventListener("click",function(){
   var name = (state.tripName||"").trim();
